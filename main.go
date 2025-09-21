@@ -4,50 +4,62 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
-	"path/filepath"
 	"runtime"
-	"strconv"
-   "strings"
 	"sync"
+	"sync/atomic"
+//	"syscall"
 	"time"
+	"golang.org/x/sys/unix"
 
 	"gonum.org/v1/gonum/mat"
 )
 
 const (
-   n = 100
+   dimension = 100
 )
 
 var (
-	mutex = sync.RWMutex{}
+	mutex      = sync.RWMutex{}
+   maxTemp    atomic.Int32
+	tjMax      int
 )
 
-func sample(paths []string) (float64, string) {
-	maxTemp := 0
-   var maxSocket string
+func pin(core int) {
+	runtime.LockOSThread()
 
-	for _, path := range paths {
-		val, err := os.ReadFile(path)
-		if err != nil {
-			panic(err)
-		}
-
-		val2, err := strconv.Atoi(strings.TrimSpace(string(val)))
-		if err != nil {
-			panic(err)
-		}
-
-		if val2 > maxTemp {
-			maxTemp = val2
-         maxSocket = path
-		}
-	}
-
-	return float64(maxTemp) / 1000., maxSocket
+   var set unix.CPUSet
+   set.Set(core)
+   err := unix.SchedSetaffinity(0, &set)
+   if err != nil {
+      panic(err)
+   }
 }
 
-func worker() {
-	m := mat.NewDense(n, n, nil)
+/*func priority(prio int) {
+	unix.SchedSetAttr()
+tid := syscall.Gettid()
+	param := &unix.SchedParam{SchedPriority: prio}
+
+	err := unix.SchedSetscheduler(tid, unix.SCHED_FIFO, param)
+	if err != nil {
+		panic(err)
+	}
+}*/
+
+func worker(core int) {
+	pin(core)
+//	priority(3)
+
+	tjMax2, err := getTjMax(core)
+	if err != nil {
+		panic("failed to get tjMax")
+	}
+
+	if tjMax2 != tjMax {
+		panic("core junction temperature disagree")
+	}
+
+	m := mat.NewDense(dimension, dimension, nil)
 
 	for i := 0; i < m.RawMatrix().Rows; i++ {
 		for j := 0; j < m.RawMatrix().Cols; j++ {
@@ -72,30 +84,53 @@ func worker() {
 
 		_ = eig.Values(nil)
 
+		// track temperature
+		temp, err := getTemp(core, IA32_THERM_STATUS)
+		if err != nil {
+			panic("failed to read IA32_THERM_STATUS")
+		}
+
+		pkgTemp, err := getTemp(core, IA32_PACKAGE_THERM_STATUS)
+		if err != nil {
+			panic("failed to read IA32_PACKAGE_THERM_STATUS")
+		}
+
+		if pkgTemp > temp {
+			temp = pkgTemp
+		}
+again:
+		maxTempLocal := maxTemp.Load()
+		if int32(temp) > maxTempLocal {
+			if !maxTemp.CompareAndSwap(maxTempLocal, int32(temp)) {
+				goto again
+			}
+		}
+
 		mutex.RUnlock()
 	}
 }
 
 func top() error {
-	paths, err := filepath.Glob("/sys/class/thermal/thermal_zone*/temp")
+	pin(0)
+
+	var err error
+	tjMax, err = getTjMax(0)
 	if err != nil {
-		return err
+		panic("failed to get tjMax")
 	}
 
-   n := runtime.NumCPU() - 1
-   fmt.Fprintf(os.Stderr, "starting up %d threads...", n)
+	cores := runtime.NumCPU()
 	mutex.Lock()
 
-	for _ = range n {
-		go worker()
+	for c := 1; c < cores; c++ {
+		go worker(c)
 	}
 
-   fmt.Fprintln(os.Stderr, "done")
-   time.Sleep(1 * time.Second) // allow temperature to stabilise
-	mutex.Unlock()
+   fmt.Fprintln(os.Stderr, "%v threads started; waiting for thermal equilibrium...", cores)
+   time.Sleep(2 * time.Second)
+	fmt.Fprintln(os.Stderr, "done")
 
-   maxTempOverall := 0.
-   maxSocket := ""
+   var maxTempOverall int32
    const limit = 10.0
    const step = 0.1
    const totalSteps = int64(limit / step * ((limit / step) + 1) * ((limit / step) + 1))
@@ -106,38 +141,17 @@ func top() error {
 		for onTime := 0.; onTime <= total; onTime += step {
 			offTime := total - onTime
 
-			// heating
-			deadline := time.Now().Add(time.Duration(onTime * float64(time.Second)))
-
-			maxTemp := 0.
-         interval := 100 * time.Millisecond
-
-         for {
-				val, socket := sample(paths)
-				if val > maxTemp {
-					maxTemp = val
-               maxSocket = socket
-				}
-
-            // if sleeping for interval puts us past the deadline, sleep only what's needed
-            left := time.Until(deadline)
-            if left > interval {
-               time.Sleep(interval)
-            } else {
-               time.Sleep(left)
-               break
-            }
-			}
-
-			// cooling
+			maxTemp.Store(0)
+			mutex.Unlock() // workers working -> heating
+			time.Sleep(time.Duration(onTime * float64(time.Second)))
 			mutex.Lock()
-			time.Sleep(time.Duration(offTime * float64(time.Second)))
-			mutex.Unlock()
 
-         fmt.Printf("%.1f/%.1f=%v ", onTime, offTime, maxTemp)
-         if maxTemp > maxTempOverall {
-            maxTempOverall = maxTemp
-            fmt.Fprintf(os.Stderr, "<new max %v at %s with %.1f/%.1f> ", maxTempOverall, maxSocket, onTime, offTime)
+			time.Sleep(time.Duration(offTime * float64(time.Second))) // workers paused -> cooling
+			fmt.Printf("%.1f/%.1f=%v ", onTime, offTime, maxTemp.Load())
+
+         if maxTemp.Load() > maxTempOverall {
+            maxTempOverall = maxTemp.Load()
+            fmt.Fprintf(os.Stderr, "<new max %v with %.1f/%.1f> ", maxTempOverall, onTime, offTime)
          }
 		}
 	}
