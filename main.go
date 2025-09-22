@@ -1,158 +1,172 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
-	"math/rand/v2"
 	"os"
+	"os/exec"
 	"runtime"
-	"sync"
-	"sync/atomic"
-//	"syscall"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
-	"golang.org/x/sys/unix"
-
-	"gonum.org/v1/gonum/mat"
 )
 
 const (
-   dimension = 100
+	sampleInterval = 10 * time.Millisecond
 )
 
 var (
-	mutex      = sync.RWMutex{}
-   maxTemp    atomic.Int32
-	tjMax      int
+	paths []string
 )
 
-func pin(core int) {
-	runtime.LockOSThread()
-
-   var set unix.CPUSet
-   set.Set(core)
-   err := unix.SchedSetaffinity(0, &set)
-   if err != nil {
-      panic(err)
-   }
-}
-
-/*func priority(prio int) {
-	unix.SchedSetAttr()
-tid := syscall.Gettid()
-	param := &unix.SchedParam{SchedPriority: prio}
-
-	err := unix.SchedSetscheduler(tid, unix.SCHED_FIFO, param)
-	if err != nil {
-		panic(err)
-	}
-}*/
-
-func worker(core int) {
-	pin(core)
-//	priority(3)
-
-	tjMax2, err := getTjMax(core)
-	if err != nil {
-		panic("failed to get tjMax")
-	}
-
-	if tjMax2 != tjMax {
-		panic("core junction temperature disagree")
-	}
-
-	m := mat.NewDense(dimension, dimension, nil)
-
-	for i := 0; i < m.RawMatrix().Rows; i++ {
-		for j := 0; j < m.RawMatrix().Cols; j++ {
-			m.Set(i, j, rand.Float64())
-		}
-	}
-
-	var lu mat.LU
-	var qr mat.QR
-	var eig mat.Eigen
+func sample(deadline time.Time) (int, int) {
+	maxTemp := 0
+	maxSocket := -1
+	once := false
 
 	for {
-		mutex.RLock()
+		for n, path := range paths {
+			val, err := os.ReadFile(path)
+			if err != nil {
+				panic(err)
+			}
 
-		lu.Factorize(m)
-		qr.Factorize(m)
+			val2, err := strconv.Atoi(strings.TrimSpace(string(val)))
+			if err != nil {
+				panic(err)
+			}
 
-		ok := eig.Factorize(m, mat.EigenBoth)
-		if !ok {
-			panic("failed to factorise")
-		}
+			if val2 > maxTemp {
+				maxTemp = val2
+				maxSocket = n
+			}
 
-		_ = eig.Values(nil)
+			left := time.Until(deadline)
+			time.Sleep(left)
 
-		// track temperature
-		temp, err := getTemp(core, IA32_THERM_STATUS)
-		if err != nil {
-			panic("failed to read IA32_THERM_STATUS")
-		}
-
-		pkgTemp, err := getTemp(core, IA32_PACKAGE_THERM_STATUS)
-		if err != nil {
-			panic("failed to read IA32_PACKAGE_THERM_STATUS")
-		}
-
-		if pkgTemp > temp {
-			temp = pkgTemp
-		}
-again:
-		maxTempLocal := maxTemp.Load()
-		if int32(temp) > maxTempLocal {
-			if !maxTemp.CompareAndSwap(maxTempLocal, int32(temp)) {
-				goto again
+			if left < sampleInterval && once {
+				return maxTemp / 1000, maxSocket
 			}
 		}
 
-		mutex.RUnlock()
+		once = true
 	}
 }
 
-func top() error {
-	pin(0)
-
-	var err error
-	tjMax, err = getTjMax(0)
+func launch(args []string) (*exec.Cmd, error) {
+	cmd := exec.Command(args[0], args[1:]...)
+	err := cmd.Start()
 	if err != nil {
-		panic("failed to get tjMax")
+		return nil, err
 	}
 
-	cores := runtime.NumCPU()
-	mutex.Lock()
+	// reap process when exited; causes signal to fail
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			panic(err)
+		}
+	}()
 
-	for c := 1; c < cores; c++ {
-		go worker(c)
+	return cmd, nil
+}
+
+func top() error {
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: sweepload <workload> [args] ...")
+		fmt.Fprintln(os.Stderr, "ensure no background activity eg via: systemctl stop fwupd irqbalance tuned")
+		flag.PrintDefaults()
 	}
 
-   fmt.Fprintln(os.Stderr, "%v threads started; waiting for thermal equilibrium...", cores)
-   time.Sleep(2 * time.Second)
-	fmt.Fprintln(os.Stderr, "done")
+	flag.Parse()
 
-   var maxTempOverall int32
-   const limit = 10.0
-   const step = 0.1
-   const totalSteps = int64(limit / step * ((limit / step) + 1) * ((limit / step) + 1))
+	if flag.NArg() < 1 {
+		flag.Usage()
+		os.Exit(2)
+	}
 
-   fmt.Fprintf(os.Stderr, "sweeping up to %.1fs over %d steps in %.1fs increments\n", limit, totalSteps, step)
+	for s := 0; true; s++ {
+		path := "/sys/class/thermal/thermal_zone" + strconv.Itoa(s) + "/temp"
+		_, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				break
+			} else {
+				return err
+			}
+		}
+		paths = append(paths, path)
+	}
 
-  	for total := 0.; total <= total * 2; total += step {
+	const limit = 10.
+	const step = 0.1
+	const totalSteps = int64(limit / step * ((limit / step) + 1) * ((limit / step) + 1))
+
+	// schedule 1 less thread for parent monitoring
+	os.Setenv("OMP_NUM_THREADS", strconv.Itoa(runtime.NumCPU()-1))
+	os.Setenv("OMP_PROC_BIND", "true")
+	os.Setenv("OMP_WAIT_POLICY", "active")
+
+	args := flag.Args()
+	cmd, err := launch(args)
+	if err != nil {
+		return err
+	}
+
+	// prevent scheduling latency on control process
+	err = syscall.Setpriority(syscall.PRIO_PROCESS, cmd.Process.Pid, 5)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "sweeping up to %.1fs over %d steps in %.1fs increments\n", limit, totalSteps, step)
+	fmt.Fprintf(os.Stderr, "waiting for thermal equilibrium...")
+
+	time.Sleep(100 * time.Millisecond)
+
+	err = cmd.Process.Signal(syscall.SIGSTOP)
+	if err != nil {
+		return err
+	}
+
+	time.Sleep(2 * time.Second)
+	maxTempOverall := 0
+
+	for total := 0.; total <= limit; total += step {
+	again:
 		for onTime := 0.; onTime <= total; onTime += step {
 			offTime := total - onTime
+			stopDeadline := time.Now().Add(time.Duration(onTime * float64(time.Second)))
 
-			maxTemp.Store(0)
-			mutex.Unlock() // workers working -> heating
-			time.Sleep(time.Duration(onTime * float64(time.Second)))
-			mutex.Lock()
+			err = cmd.Process.Signal(syscall.SIGCONT)
+			if err != nil {
+				return err
+			}
 
-			time.Sleep(time.Duration(offTime * float64(time.Second))) // workers paused -> cooling
-			fmt.Printf("%.1f/%.1f=%v ", onTime, offTime, maxTemp.Load())
+			maxTemp, socket := sample(stopDeadline)
 
-         if maxTemp.Load() > maxTempOverall {
-            maxTempOverall = maxTemp.Load()
-            fmt.Fprintf(os.Stderr, "<new max %v with %.1f/%.1f> ", maxTempOverall, onTime, offTime)
-         }
+			if maxTemp > maxTempOverall {
+				maxTempOverall = maxTemp
+				fmt.Fprintf(os.Stderr, "<new max %v with %.1f/%.1f on S%d> ", maxTempOverall, onTime, offTime, socket)
+			}
+
+			err = cmd.Process.Signal(syscall.SIGSTOP)
+			if err != nil {
+				if !errors.Is(err, os.ErrProcessDone) {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "<relaunching workload>")
+				cmd, err = launch(args)
+				if err != nil {
+					return err
+				}
+				goto again
+			}
+
+			time.Sleep(time.Duration(offTime * float64(time.Second)))
+			fmt.Printf("%.1f/%.1f=%d ", onTime, offTime, maxTemp)
 		}
 	}
 	return nil
@@ -161,6 +175,6 @@ func top() error {
 func main() {
 	err := top()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, err.Error())
+		fmt.Fprintln(os.Stderr, err.Error())
 	}
 }
