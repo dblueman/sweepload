@@ -142,7 +142,7 @@ func top() error {
 	minTempOverall := 80
 	maxTempOverall := tjMax
 
-	for total := 0; total <= limit*steps; total++ {
+	for total := 0; total < limit*steps; total++ {
 	again:
 		for onTime := 0; onTime <= total; onTime++ {
 			offTime := total - onTime
@@ -179,7 +179,11 @@ func top() error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprint(os.Stderr, "<updated heatmap.pdf>")
+		err = heatmap.Render(minTempOverall, maxTempOverall, limit, "heatmap.png")
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(os.Stderr, "<updated heatmap.pdf/png>")
 		time.Sleep(time.Millisecond * 500) // allow cooling
 	}
 
