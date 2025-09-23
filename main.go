@@ -101,11 +101,10 @@ func top() error {
 		paths = append(paths, path)
 	}
 
-	const limit = 10.
-	const step = 0.1
-	const totalSteps = int64(limit / step * ((limit / step) + 1) * ((limit / step) + 1))
+	const limit = 10
+	const steps = 10
 
-	heatmap := NewHeatmap(int(limit/step)+1, int(limit/step)+1)
+	heatmap := NewHeatmap(limit*steps, limit*steps)
 
 	// schedule 1 less thread for parent monitoring
 	os.Setenv("OMP_NUM_THREADS", strconv.Itoa(runtime.NumCPU()-1))
@@ -124,13 +123,13 @@ func top() error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "sweeping up to %.1fs over %d steps in %.1fs increments\n", limit, totalSteps, step)
+	fmt.Fprintf(os.Stderr, "sweeping up to %.1fs over %d steps in %.1fs increments\n", float64(limit)/steps, steps, 1/float64(steps))
 
 	tjMax, err := getTjMax(0)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "tjMax=%d'C; waiting for thermal equilibrium...")
+	fmt.Fprintf(os.Stderr, "tjMax=%d'C; waiting for thermal equilibrium...", tjMax)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -139,31 +138,22 @@ func top() error {
 		return err
 	}
 
-	time.Sleep(2 * time.Second)
-	minTempOverall := tjMax
-	maxTempOverall := 0
+	time.Sleep(3 * time.Second)
+	minTempOverall := 80
+	maxTempOverall := tjMax
 
-	for total := 0.; total <= limit; total += step {
+	for total := 0; total <= limit*steps; total++ {
 	again:
-		for onTime := 0.; onTime <= total; onTime += step {
+		for onTime := 0; onTime <= total; onTime++ {
 			offTime := total - onTime
-			stopDeadline := time.Now().Add(time.Duration(onTime * float64(time.Second)))
+			stopDeadline := time.Now().Add(time.Duration(float64(onTime) / steps * float64(time.Second)))
 
 			err = cmd.Process.Signal(syscall.SIGCONT)
 			if err != nil {
 				return err
 			}
 
-			maxTemp, socket := sample(stopDeadline)
-
-			if maxTemp > maxTempOverall {
-				maxTempOverall = maxTemp
-				fmt.Fprintf(os.Stderr, "<new max %v with %.1f/%.1f on S%d> ", maxTempOverall, onTime, offTime, socket)
-			}
-
-			if maxTemp < minTempOverall {
-				minTempOverall = maxTemp
-			}
+			maxTemp, _ := sample(stopDeadline)
 
 			err = cmd.Process.Signal(syscall.SIGSTOP)
 			if err != nil {
@@ -178,17 +168,19 @@ func top() error {
 				goto again
 			}
 
-			time.Sleep(time.Duration(offTime * float64(time.Second)))
-			fmt.Printf("%.1f/%.1f=%d ", onTime, offTime, maxTemp)
-			heatmap.Set(int(onTime/step), int(offTime/step), float64(maxTemp))
+			time.Sleep(time.Duration(float64(offTime) / steps * float64(time.Second)))
+			fmt.Printf("%.1f/%.1f=%d ", float64(onTime)/steps, float64(offTime)/steps, maxTemp)
+
+			heatmap.Set(onTime, offTime, float64(maxTemp-minTempOverall))
 		}
 
 		// render at each row for early results
-		err = heatmap.Render(float64(minTempOverall), float64(maxTempOverall), "heatmap.pdf")
+		err = heatmap.Render(minTempOverall, maxTempOverall, limit, "heatmap.pdf")
 		if err != nil {
 			return err
 		}
 		fmt.Fprint(os.Stderr, "<updated heatmap.pdf>")
+		time.Sleep(time.Millisecond * 500) // allow cooling
 	}
 
 	return nil
