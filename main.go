@@ -1,5 +1,6 @@
 package main
 
+// To use this, run: go get gonum.org/v1/plot/...
 import (
 	"errors"
 	"flag"
@@ -104,6 +105,8 @@ func top() error {
 	const step = 0.1
 	const totalSteps = int64(limit / step * ((limit / step) + 1) * ((limit / step) + 1))
 
+	heatmap := NewHeatmap(int(limit/step)+1, int(limit/step)+1)
+
 	// schedule 1 less thread for parent monitoring
 	os.Setenv("OMP_NUM_THREADS", strconv.Itoa(runtime.NumCPU()-1))
 	os.Setenv("OMP_PROC_BIND", "true")
@@ -122,7 +125,12 @@ func top() error {
 	}
 
 	fmt.Fprintf(os.Stderr, "sweeping up to %.1fs over %d steps in %.1fs increments\n", limit, totalSteps, step)
-	fmt.Fprintf(os.Stderr, "waiting for thermal equilibrium...")
+
+	tjMax, err := getTjMax(0)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "tjMax=%d'C; waiting for thermal equilibrium...")
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -132,6 +140,7 @@ func top() error {
 	}
 
 	time.Sleep(2 * time.Second)
+	minTempOverall := tjMax
 	maxTempOverall := 0
 
 	for total := 0.; total <= limit; total += step {
@@ -152,6 +161,10 @@ func top() error {
 				fmt.Fprintf(os.Stderr, "<new max %v with %.1f/%.1f on S%d> ", maxTempOverall, onTime, offTime, socket)
 			}
 
+			if maxTemp < minTempOverall {
+				minTempOverall = maxTemp
+			}
+
 			err = cmd.Process.Signal(syscall.SIGSTOP)
 			if err != nil {
 				if !errors.Is(err, os.ErrProcessDone) {
@@ -167,8 +180,17 @@ func top() error {
 
 			time.Sleep(time.Duration(offTime * float64(time.Second)))
 			fmt.Printf("%.1f/%.1f=%d ", onTime, offTime, maxTemp)
+			heatmap.Set(int(onTime/step), int(offTime/step), float64(maxTemp))
 		}
+
+		// render at each row for early results
+		err = heatmap.Render(float64(minTempOverall), float64(maxTempOverall), "heatmap.pdf")
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(os.Stderr, "<updated heatmap.pdf>")
 	}
+
 	return nil
 }
 
