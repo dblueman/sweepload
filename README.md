@@ -32,4 +32,4 @@ gcc -std=c99 -march=native -fopenmp -Ofast -o m-queens main.c
 
 ## Output
 
-`sweepload` performs cycles of workload and rest times, printing loops of `ontime/offtime=temp` where times are in seconds and temperature is the highest socket temperature in Celcius. Time ranges up to 10 seconds are swept by default in 0.1s increments, taking around 8h. After each group of times, a heatmap PDF and SVG file is written for an early look.
+`sweepload` performs cycles of workload and rest times, printing loops of `ontime/offtime=temp` (eg `0.9/0.1=96`)where times are in seconds and temperature is the highest socket temperature in Celcius. Time ranges up to 10 seconds are swept by default in 0.1s increments, taking around 8h. After each group of times, a heatmap PDF and SVG file is written for an early look.
