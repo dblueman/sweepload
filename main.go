@@ -135,6 +135,10 @@ func top() error {
 
 	err = cmd.Process.Signal(syscall.SIGSTOP)
 	if err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			return errors.New("workload exited prematurely; check arguments")
+		}
+
 		return err
 	}
 
@@ -150,12 +154,21 @@ func top() error {
 
 			err = cmd.Process.Signal(syscall.SIGCONT)
 			if err != nil {
-				return err
+				if !errors.Is(err, os.ErrProcessDone) {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "<relaunching workload>")
+				cmd, err = launch(args)
+				if err != nil {
+					return err
+				}
+				goto again
 			}
 
 			maxTemp, _ := sample(stopDeadline)
 
 			err = cmd.Process.Signal(syscall.SIGSTOP)
+			// FIXME address duplication
 			if err != nil {
 				if !errors.Is(err, os.ErrProcessDone) {
 					return err

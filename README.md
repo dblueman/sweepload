@@ -23,7 +23,7 @@ It is recommend to use a scalable, affine (compute-bound) OpenMP workload, for e
 git clone https://github.com/sudden6/m-queens.git
 cd m-queens
 gcc -std=c99 -march=native -fopenmp -Ofast -o m-queens main.c
-~/go/bin/sweepload ./m-queens 20
+~/go/bin/sweepload ./m-queens 29
 ```
 
 `sweepload` sets appropriate OpenMP environment variables for optimal thread pinning.
