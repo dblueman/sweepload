@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"gonum.org/v1/gonum/mat"
 )
 
 const (
@@ -90,6 +92,7 @@ func top() error {
 
 	for s := 0; true; s++ {
 		path := "/sys/class/thermal/thermal_zone" + strconv.Itoa(s) + "/temp"
+
 		_, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -98,13 +101,16 @@ func top() error {
 				return err
 			}
 		}
+
 		paths = append(paths, path)
 	}
 
 	const limit = 10
 	const steps = 10
 
-	heatmap := NewHeatmap(limit*steps, limit*steps)
+	heatmap := Heatmap{
+		Data: mat.NewDense(limit*steps, limit*steps, nil),
+	}
 
 	// schedule 1 less thread for parent monitoring
 	os.Setenv("OMP_NUM_THREADS", strconv.Itoa(runtime.NumCPU()-1))
@@ -125,12 +131,12 @@ func top() error {
 
 	fmt.Fprintf(os.Stderr, "sweeping up to %.1fs over %d steps in %.1fs increments\n", float64(limit)/steps, steps, 1/float64(steps))
 
-	tjMax, err := getTjMax(0)
+	maxTempOverall, err := getTjMax(0)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "tjMax=%d'C; waiting for thermal equilibrium...", tjMax)
 
+	fmt.Fprint(os.Stderr, "waiting for thermal equilibrium...")
 	time.Sleep(100 * time.Millisecond)
 
 	err = cmd.Process.Signal(syscall.SIGSTOP)
@@ -142,9 +148,13 @@ func top() error {
 		return err
 	}
 
-	time.Sleep(3 * time.Second)
-	minTempOverall := 80
-	maxTempOverall := tjMax
+	time.Sleep(4 * time.Second)
+	minTempOverall, _ := sample(time.Now().Add(100 * time.Millisecond))
+	minTempOverall -= 3 // add margin
+	fmt.Fprintf(os.Stderr, "range %d-%d'C (tjMax)\n", minTempOverall, maxTempOverall)
+
+	// set max temperature to ensure full range is displayed
+	heatmap.Data.Set(limit*(steps-0.1), limit*(steps-0.1), float64(maxTempOverall-minTempOverall))
 
 	for total := 0; total < limit*steps; total++ {
 	again:
@@ -184,19 +194,20 @@ func top() error {
 			time.Sleep(time.Duration(float64(offTime) / steps * float64(time.Second)))
 			fmt.Printf("%.1f/%.1f=%d ", float64(onTime)/steps, float64(offTime)/steps, maxTemp)
 
-			heatmap.Set(onTime, offTime, float64(maxTemp-minTempOverall))
+			heatmap.Data.Set(onTime, offTime, float64(maxTemp-minTempOverall))
+		}
+
+		err = heatmap.Render(minTempOverall, maxTempOverall, limit*steps, limit*steps,
+			fmt.Sprintf("System temperature under pulsed workloads (%d-%d'C)", minTempOverall, maxTempOverall),
+			"idle time (s)",
+			"compute time (s)",
+			"heatmap.pdf")
+		if err != nil {
+			return err
 		}
 
 		// render at each row for early results
-		err = heatmap.Render(minTempOverall, maxTempOverall, limit, "heatmap.pdf")
-		if err != nil {
-			return err
-		}
-		err = heatmap.Render(minTempOverall, maxTempOverall, limit, "heatmap.png")
-		if err != nil {
-			return err
-		}
-		fmt.Fprint(os.Stderr, "<updated heatmap.pdf/png>")
+		fmt.Fprint(os.Stderr, "<updated heatmap.pdf>")
 		time.Sleep(time.Millisecond * 500) // allow cooling
 	}
 

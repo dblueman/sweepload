@@ -21,6 +21,7 @@ func readMSR(cpu int, msr uint64) (uint64, error) {
 	defer f.Close()
 
 	buf := make([]byte, 8)
+
 	_, err = f.ReadAt(buf, int64(msr))
 	if err != nil {
 		return 0, err
