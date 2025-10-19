@@ -2,9 +2,8 @@ package main
 
 import (
 	"fmt"
-	"math"
+	"image/color"
 	"os"
-	"strconv"
 
 	"gonum.org/v1/gonum/mat"
 	"gonum.org/v1/plot"
@@ -21,7 +20,9 @@ type Heatmap struct {
 	Data             *mat.Dense
 }
 
-type integerTicks struct{}
+type ticks struct {
+	divisor int
+}
 
 func (h Heatmap) Dims() (int, int) {
 	r, c := h.Data.Dims()
@@ -48,33 +49,38 @@ func (h Heatmap) Y(r int) float64 {
 	return float64(r) + h.YOffset
 }
 
-func (integerTicks) Ticks(min, max float64) []plot.Tick {
-	var t []plot.Tick
+func (t ticks) Ticks(min, max float64) []plot.Tick {
+	var ts []plot.Tick
 
-	for i := min; i <= max; i++ {
-		j := (i + 0.5) / 10.
-
-		name := ""
-		if j*2 == math.Trunc(j*2) {
-			name = fmt.Sprintf("%0.1f", j)
-		}
-
-		t = append(t, plot.Tick{Value: i, Label: name})
+	for i := min + 0.5; i <= max; i += float64(t.divisor) / 2 {
+		j := i / float64(t.divisor)
+		name := fmt.Sprintf("%0.1f", j)
+		ts = append(ts, plot.Tick{Value: i, Label: name})
 	}
-	return t
+	return ts
 }
 
-func (h Heatmap) Render(mini, maxi int, xMax, yMax float64, title, xLabel, yLabel, filename string) error {
-	pal := moreland.ExtendedBlackBody().Palette(maxi - mini + 1)
+func (h Heatmap) Render(mini, maxi, xMax, yMax float64, divisor int, title, xLabel, yLabel, filename string) error {
+	pal := moreland.ExtendedBlackBody().Palette(int(maxi - mini + 1))
 	g := plotter.NewHeatMap(h, pal)
+	g.Min = mini
+	g.Max = maxi
+	g.Rasterized = false
+	g.NaN = color.RGBA{0, 255, 0, 255}
+	g.Underflow = g.NaN
+	g.Overflow = g.NaN
 
 	p := plot.New()
+	/* p.TextHandler = text.Plain{
+		Fonts: font.DefaultCache,
+	} */
+
 	p.Title.Text = title
 	p.X.Label.Text = xLabel
 	p.Y.Label.Text = yLabel
 
-	p.X.Tick.Marker = integerTicks{}
-	p.Y.Tick.Marker = integerTicks{}
+	p.X.Tick.Marker = ticks{divisor: divisor}
+	p.Y.Tick.Marker = ticks{divisor: divisor}
 
 	p.Add(g)
 
@@ -82,7 +88,7 @@ func (h Heatmap) Render(mini, maxi int, xMax, yMax float64, title, xLabel, yLabe
 	thumbs := plotter.PaletteThumbnailers(pal)
 
 	for i := range thumbs {
-		l.Add(strconv.Itoa(i+mini), thumbs[i])
+		l.Add(fmt.Sprintf("%.f", float64(i)+mini), thumbs[i])
 	}
 
 	p.X.Max = xMax

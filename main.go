@@ -105,8 +105,8 @@ func top() error {
 		paths = append(paths, path)
 	}
 
-	const limit = 10
-	const steps = 10
+	const limit = 8
+	const steps = 8
 
 	heatmap := Heatmap{
 		Data: mat.NewDense(limit*steps, limit*steps, nil),
@@ -153,13 +153,9 @@ func top() error {
 	minTempOverall -= 3 // add margin
 	fmt.Fprintf(os.Stderr, "range %d-%d'C (tjMax)\n", minTempOverall, maxTempOverall)
 
-	// set max temperature to ensure full range is displayed
-	heatmap.Data.Set(limit*(steps-0.1), limit*(steps-0.1), float64(maxTempOverall-minTempOverall))
-
-	for total := 0; total < limit*steps; total++ {
-	again:
-		for onTime := 0; onTime <= total; onTime++ {
-			offTime := total - onTime
+	for offTime := range limit * steps {
+		for onTime := range limit * steps {
+		again:
 			stopDeadline := time.Now().Add(time.Duration(float64(onTime) / steps * float64(time.Second)))
 
 			err = cmd.Process.Signal(syscall.SIGCONT)
@@ -172,6 +168,7 @@ func top() error {
 				if err != nil {
 					return err
 				}
+				time.Sleep(time.Second) // allow cooling
 				goto again
 			}
 
@@ -197,8 +194,8 @@ func top() error {
 			heatmap.Data.Set(onTime, offTime, float64(maxTemp-minTempOverall))
 		}
 
-		err = heatmap.Render(minTempOverall, maxTempOverall, limit*steps, limit*steps,
-			fmt.Sprintf("System temperature under pulsed workloads (%d-%d'C)", minTempOverall, maxTempOverall),
+		err = heatmap.Render(float64(minTempOverall), float64(maxTempOverall), limit*steps, limit*steps, steps,
+			"System temperature under pulsed workloads ('C)",
 			"idle time (s)",
 			"compute time (s)",
 			"heatmap.pdf")
@@ -208,7 +205,7 @@ func top() error {
 
 		// render at each row for early results
 		fmt.Fprint(os.Stderr, "<updated heatmap.pdf>")
-		time.Sleep(time.Millisecond * 500) // allow cooling
+		time.Sleep(time.Second) // allow cooling
 	}
 
 	return nil
