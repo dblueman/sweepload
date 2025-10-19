@@ -131,7 +131,7 @@ func top() error {
 
 	fmt.Fprintf(os.Stderr, "sweeping up to %.1fs over %d steps in %.1fs increments\n", float64(limit)/steps, steps, 1/float64(steps))
 
-	maxTempOverall, err := getTjMax(0)
+	tjMax, err := getTjMax(0)
 	if err != nil {
 		return err
 	}
@@ -151,7 +151,8 @@ func top() error {
 	time.Sleep(4 * time.Second)
 	minTempOverall, _ := sample(time.Now().Add(100 * time.Millisecond))
 	minTempOverall -= 3 // add margin
-	fmt.Fprintf(os.Stderr, "range %d-%d'C (tjMax)\n", minTempOverall, maxTempOverall)
+	maxTempOverall := 0
+	fmt.Fprintf(os.Stderr, "range %d-%d'C (tjMax)\n", minTempOverall, tjMax)
 
 	for offTime := range limit * steps {
 		for onTime := range limit * steps {
@@ -173,6 +174,13 @@ func top() error {
 			}
 
 			maxTemp, _ := sample(stopDeadline)
+			if maxTemp < minTempOverall {
+				minTempOverall = maxTemp
+			}
+
+			if maxTemp > maxTempOverall {
+				maxTempOverall = maxTemp
+			}
 
 			err = cmd.Process.Signal(syscall.SIGSTOP)
 			// FIXME address duplication
@@ -191,11 +199,11 @@ func top() error {
 			time.Sleep(time.Duration(float64(offTime) / steps * float64(time.Second)))
 			fmt.Printf("%.1f/%.1f=%d ", float64(onTime)/steps, float64(offTime)/steps, maxTemp)
 
-			heatmap.Data.Set(onTime, offTime, float64(maxTemp-minTempOverall))
+			heatmap.Data.Set(onTime, offTime, float64(maxTemp))
 		}
 
 		err = heatmap.Render(float64(minTempOverall), float64(maxTempOverall), limit*steps, limit*steps, steps,
-			"System temperature under pulsed workloads ('C)",
+			fmt.Sprintf("System temperature under pulsed workloads (%d-%d'C; tjMax @ %d'C)", minTempOverall, maxTempOverall, tjMax),
 			"idle time (s)",
 			"compute time (s)",
 			"heatmap.pdf")
